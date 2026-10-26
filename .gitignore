@@ -1,0 +1,11 @@
+*.exe
+*.test
+*.out
+/bin/
+/dist/
+node_modules/
+web/dist/
+.env
+*.log
+.muse-github-snapshot-sync.json
+coverage.out
