@@ -1,0 +1,15 @@
+{
+  "name": "kairo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Kairo - Distributed Observability & Failure Investigation Platform",
+  "scripts": {
+    "start": "powershell -ExecutionPolicy Bypass -File ./scripts/run-local.ps1",
+    "dev": "powershell -ExecutionPolicy Bypass -File ./scripts/run-local.ps1",
+    "dev:web": "npm --prefix web run dev",
+    "build:web": "npm --prefix web run build",
+    "test:web": "npm --prefix web run test",
+    "test:go": "go test ./...",
+    "test": "npm --prefix web run test && go test ./..."
+  }
+}

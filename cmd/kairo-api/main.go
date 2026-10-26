@@ -116,7 +116,7 @@ func seedDemo(logger *slog.Logger, store storage.Store, cfg *config.Config) {
 	}
 	now := time.Now().UTC()
 	project := model.Project{
-		ID:            model.NewID(),
+		ID:            model.DemoProjectID,
 		Name:          "Demo Project",
 		CreatedAt:     now,
 		UpdatedAt:     now,

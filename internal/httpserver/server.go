@@ -11,6 +11,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -87,13 +90,24 @@ func New(cfg *config.Config, store storage.Store, logger *slog.Logger) *Server {
 	mux.HandleFunc("GET /api/v1/scenarios/{runId}", s.handleGetScenario)
 	mux.HandleFunc("POST /api/v1/scenarios/{runId}/cancel", s.handleCancelScenario)
 
+	mux.HandleFunc("GET /index.html", s.handleNotFound)
 	mux.HandleFunc("/", s.handleNotFound)
 	s.mux = mux
 	return s
 }
 
-// ServeHTTP implements http.Handler with request logging.
+// ServeHTTP implements http.Handler with request logging and CORS support.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, Origin, X-Api-Key, X-Admin-Token")
+	w.Header().Set("Access-Control-Max-Age", "86400")
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	start := time.Now()
 	rec := &statusRecorder{ResponseWriter: w, status: 200}
 	s.mux.ServeHTTP(rec, r)
@@ -133,6 +147,28 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 }
 
 func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
+	if !strings.HasPrefix(r.URL.Path, "/api/") && !strings.HasPrefix(r.URL.Path, "/v1/") {
+		for _, dir := range []string{"web/dist", "./web/dist", "../web/dist", "../../web/dist", "web", "./web"} {
+			if stat, err := os.Stat(dir); err == nil && stat.IsDir() {
+				clean := path.Clean(r.URL.Path)
+				if clean == "/" || clean == "." {
+					clean = "/index.html"
+				}
+				target := filepath.Join(dir, filepath.FromSlash(clean))
+				if fStat, err := os.Stat(target); err == nil && !fStat.IsDir() {
+					http.ServeFile(w, r, target)
+					return
+				}
+				// SPA fallback: any non-asset route serves index.html
+				indexPath := filepath.Join(dir, "index.html")
+				if iStat, err := os.Stat(indexPath); err == nil && !iStat.IsDir() {
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					http.ServeFile(w, r, indexPath)
+					return
+				}
+			}
+		}
+	}
 	writeError(w, http.StatusNotFound, "not_found", "route not found")
 }
 
@@ -173,10 +209,20 @@ func (s *Server) resolveProject(w http.ResponseWriter, r *http.Request) (string,
 	qp := r.URL.Query().Get("project_id")
 	if s.isAdmin(r) {
 		if qp == "" {
+			if raw := rawAPIKey(r); raw != "" {
+				if meta, err := auth.Validate(s.store, raw); err == nil {
+					return meta.ProjectID, true
+				}
+			}
 			writeError(w, http.StatusBadRequest, "project_required", "project_id query parameter is required with admin authentication")
 			return "", false
 		}
 		if _, ok := s.store.GetProject(qp); !ok {
+			if qp == "proj-default" || qp == "default" {
+				if _, ok := s.store.GetProject(model.DemoProjectID); ok {
+					return model.DemoProjectID, true
+				}
+			}
 			writeError(w, http.StatusNotFound, "project_not_found", "project not found")
 			return "", false
 		}
@@ -193,6 +239,9 @@ func (s *Server) resolveProject(w http.ResponseWriter, r *http.Request) (string,
 		return "", false
 	}
 	if qp != "" && qp != meta.ProjectID {
+		if (qp == "proj-default" || qp == "default") && meta.ProjectID == model.DemoProjectID {
+			return meta.ProjectID, true
+		}
 		writeError(w, http.StatusForbidden, "forbidden", "API key does not grant access to the requested project")
 		return "", false
 	}
@@ -204,10 +253,20 @@ func (s *Server) resolveProject(w http.ResponseWriter, r *http.Request) (string,
 func (s *Server) resolveProjectForBody(w http.ResponseWriter, r *http.Request, bodyProjectID string) (string, bool) {
 	if s.isAdmin(r) {
 		if bodyProjectID == "" {
+			if raw := rawAPIKey(r); raw != "" {
+				if meta, err := auth.Validate(s.store, raw); err == nil {
+					return meta.ProjectID, true
+				}
+			}
 			writeError(w, http.StatusBadRequest, "project_required", "project_id is required")
 			return "", false
 		}
 		if _, ok := s.store.GetProject(bodyProjectID); !ok {
+			if bodyProjectID == "proj-default" || bodyProjectID == "default" {
+				if _, ok := s.store.GetProject(model.DemoProjectID); ok {
+					return model.DemoProjectID, true
+				}
+			}
 			writeError(w, http.StatusNotFound, "project_not_found", "project not found")
 			return "", false
 		}
@@ -224,6 +283,9 @@ func (s *Server) resolveProjectForBody(w http.ResponseWriter, r *http.Request, b
 		return "", false
 	}
 	if bodyProjectID != "" && bodyProjectID != meta.ProjectID {
+		if (bodyProjectID == "proj-default" || bodyProjectID == "default") && meta.ProjectID == model.DemoProjectID {
+			return meta.ProjectID, true
+		}
 		writeError(w, http.StatusForbidden, "forbidden", "API key does not grant access to the requested project")
 		return "", false
 	}
@@ -1005,6 +1067,7 @@ func (s *Server) handleStartScenario(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ProjectID    string         `json:"project_id"`
 		ScenarioType string         `json:"scenario_type"`
+		ScenarioID   string         `json:"scenario_id"`
 		Parameters   map[string]any `json:"parameters"`
 		Workload     int            `json:"workload"`
 	}
@@ -1014,6 +1077,9 @@ func (s *Server) handleStartScenario(w http.ResponseWriter, r *http.Request) {
 	projectID, ok := s.resolveProjectForBody(w, r, body.ProjectID)
 	if !ok {
 		return
+	}
+	if body.ScenarioType == "" && body.ScenarioID != "" {
+		body.ScenarioType = body.ScenarioID
 	}
 	if body.ScenarioType == "" {
 		writeError(w, http.StatusBadRequest, "validation_error", "scenario_type is required")

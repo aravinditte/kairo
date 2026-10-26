@@ -7,5 +7,6 @@ node_modules/
 web/dist/
 .env
 *.log
+.kairo-run/
 .muse-github-snapshot-sync.json
 coverage.out

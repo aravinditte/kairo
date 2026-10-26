@@ -6,7 +6,9 @@ package integration
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -60,9 +62,81 @@ func TestPostgresStoreRoundTrip(t *testing.T) {
 	if err != nil || len(other) != 0 {
 		t.Fatalf("cross-tenant spans = %d err = %v", len(other), err)
 	}
+
+	// QuerySpans with filter.
+	queryRes, err := store.QuerySpans(ctx, project.ID, now.Add(-time.Minute), now.Add(time.Minute), "checkout", "POST /checkout", 10)
+	if err != nil || len(queryRes) != 1 {
+		t.Fatalf("query spans = %d err = %v", len(queryRes), err)
+	}
+
+	// Pagination with SearchTraces.
+	searchPage, err := store.SearchTraces(ctx, project.ID, model.TraceSearchFilter{
+		Start: now.Add(-time.Hour),
+		End:   now.Add(time.Hour),
+		Limit: 10,
+	})
+	if err != nil || len(searchPage.Traces) != 1 {
+		t.Fatalf("search traces = %d err = %v", len(searchPage.Traces), err)
+	}
+
+	// Alert events.
+	alert := model.AlertEvent{
+		ID:             model.NewID(),
+		ProjectID:      project.ID,
+		ServiceName:    "checkout",
+		RuleType:       "p95_latency",
+		ObservedValue:  600,
+		ThresholdValue: 500,
+		WindowStart:    now.Add(-5 * time.Minute),
+		WindowEnd:      now,
+		CreatedAt:      now,
+		Status:         "active",
+	}
+	if err := store.InsertAlert(alert); err != nil {
+		t.Fatalf("insert alert: %v", err)
+	}
+	alerts := store.ListAlerts(project.ID, 10)
+	if len(alerts) != 1 {
+		t.Fatalf("list alerts = %d", len(alerts))
+	}
+	if !store.HasRecentAlert(project.ID, "checkout", "p95_latency", now.Add(-time.Minute)) {
+		t.Fatalf("expected recent alert")
+	}
+
+	// Concurrent writes verification.
+	var wg sync.WaitGroup
+	concurrentErrors := make(chan error, 10)
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			s := model.Span{
+				ProjectID:     project.ID,
+				TraceID:       fmt.Sprintf("trace-%d-bbbbbbbbbbbbbbbbbbbb", worker),
+				SpanID:        fmt.Sprintf("span-%d-11111111", worker),
+				ServiceName:   "inventory",
+				OperationName: "GET /reserve",
+				SpanKind:      2,
+				StartTime:     now,
+				EndTime:       now.Add(10 * time.Millisecond),
+				DurationNs:    10_000_000,
+				StatusCode:    "ok",
+				IngestedAt:    now,
+			}
+			if _, _, err := store.InsertSpans(ctx, []model.Span{s}); err != nil {
+				concurrentErrors <- err
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(concurrentErrors)
+	for err := range concurrentErrors {
+		t.Fatalf("concurrent insert error: %v", err)
+	}
+
 	// Retention cleanup.
 	n, err := store.DeleteSpansBefore(ctx, project.ID, now.Add(time.Hour), 100)
-	if err != nil || n != 1 {
+	if err != nil || n < 1 {
 		t.Fatalf("retention delete = %d err = %v", n, err)
 	}
 }

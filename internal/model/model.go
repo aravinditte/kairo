@@ -8,6 +8,9 @@ import (
 	"time"
 )
 
+// DemoProjectID is the deterministic UUID used for the seeded demo project.
+const DemoProjectID = "00000000-0000-0000-0000-000000000001"
+
 // NewID returns a random RFC 4122 version 4 UUID string.
 func NewID() string {
 	var b [16]byte

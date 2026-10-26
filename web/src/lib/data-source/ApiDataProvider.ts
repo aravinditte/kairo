@@ -1,34 +1,107 @@
 import type { KairoDataProvider } from "./DataProvider";
-import type { AlertQuery, CreateApiKeyResponse, MetricsQuery, OverviewData, OverviewQuery, Project, RedMetrics, ScenarioRun, ScenarioRunRequest, Thresholds, TraceSearchQuery } from "../../types";
+import type { AlertQuery, ConsoleLogEntry, CreateApiKeyResponse, MetricsQuery, OverviewData, OverviewQuery, Project, RedMetrics, ScenarioRun, ScenarioRunRequest, Thresholds, TraceSearchQuery } from "../../types";
 
 /** Calls the Go backend. Never falls back to demo data: failures surface as errors to the UI. */
 export class ApiDataProvider implements KairoDataProvider {
   readonly mode = "api" as const;
-  private base: string; private projectId: string;
-  constructor(baseUrl: string, projectId: string) { this.base = baseUrl.replace(/\/$/, ""); this.projectId = projectId; }
+  private base: string;
+  private projectId: string;
+  private logs: ConsoleLogEntry[] = [
+    {
+      id: "api-log-init",
+      timestamp: new Date().toISOString(),
+      severity: "INFO",
+      subsystem: "api",
+      message: "Connected to Kairo Live Backend (API mode)",
+    },
+  ];
+  private logCounter = 1;
+
+  constructor(baseUrl: string, projectId: string) {
+    this.base = baseUrl.replace(/\/$/, "");
+    this.projectId = projectId;
+  }
+
+  getConsoleLogs(): ConsoleLogEntry[] {
+    return [...this.logs];
+  }
+
+  addConsoleLog(entry: Omit<ConsoleLogEntry, "id" | "timestamp">): void {
+    this.logCounter++;
+    this.logs.push({
+      id: `api-log-${Date.now()}-${this.logCounter}`,
+      timestamp: new Date().toISOString(),
+      ...entry,
+    });
+    if (this.logs.length > 500) {
+      this.logs = this.logs.slice(-400);
+    }
+  }
+
+  clearConsoleLogs(): void {
+    this.logs = [];
+  }
+
+  resetDemoData(): void {
+    this.addConsoleLog({
+      severity: "INFO",
+      subsystem: "api",
+      message: "API mode active: live telemetry stored in backend database.",
+    });
+  }
+
   private headers(): Record<string, string> {
     const h: Record<string, string> = { "Content-Type": "application/json" };
-    const apiKey = sessionStorage.getItem("kairo_api_key");
-    const admin = sessionStorage.getItem("kairo_admin_token");
+    const storedApiKey = sessionStorage.getItem("kairo_api_key");
+    const apiKey = storedApiKey !== null ? storedApiKey : "kairo-dev-key";
+    const storedAdmin = sessionStorage.getItem("kairo_admin_token");
+    const admin = storedAdmin !== null ? storedAdmin : "kairo-dev-admin";
     if (apiKey) h["X-Api-Key"] = apiKey;
     if (admin) h["X-Admin-Token"] = admin;
     return h;
   }
+
   private async req<T>(path: string, init?: RequestInit): Promise<T> {
-    const res = await fetch(`${this.base}${path}`, { ...init, headers: { ...this.headers(), ...(init?.headers ?? {}) } });
-    if (!res.ok) {
-      let msg = `API request failed (${res.status})`;
-      try { const body = await res.json(); msg = body?.error?.message ?? msg; } catch { /* keep default */ }
-      throw new Error(msg);
+    const method = init?.method ?? "GET";
+    try {
+      const res = await fetch(`${this.base}${path}`, { ...init, headers: { ...this.headers(), ...(init?.headers ?? {}) } });
+      if (!res.ok) {
+        let msg = `API request failed (${res.status})`;
+        try { const body = await res.json(); msg = body?.error?.message ?? msg; } catch { /* keep default */ }
+        this.addConsoleLog({
+          severity: "ERROR",
+          subsystem: "api",
+          message: `${method} ${path} -> HTTP ${res.status}: ${msg}`,
+        });
+        throw new Error(msg);
+      }
+      if (method !== "GET") {
+        this.addConsoleLog({
+          severity: "SUCCESS",
+          subsystem: "api",
+          message: `${method} ${path} -> HTTP ${res.status}`,
+        });
+      }
+      if (res.status === 204) return undefined as T;
+      return (await res.json()) as T;
+    } catch (err) {
+      if (!(err instanceof Error && err.message.includes("API request failed"))) {
+        this.addConsoleLog({
+          severity: "ERROR",
+          subsystem: "network",
+          message: `${method} ${path} network failure: ${(err as Error).message}`,
+        });
+      }
+      throw err;
     }
-    if (res.status === 204) return undefined as T;
-    return (await res.json()) as T;
   }
+
   private qs(params: Record<string, string | number | undefined | null>): string {
     const u = new URLSearchParams(); u.set("project_id", this.projectId);
     for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null && v !== "") u.set(k, String(v));
     return u.toString();
   }
+
   async getOverview(q: OverviewQuery) { return this.req<OverviewData>(`/api/v1/overview?${this.qs({ start: q.start, end: q.end, interval_seconds: q.interval_seconds })}`); }
   async searchTraces(q: TraceSearchQuery) {
     const raw = await this.req<any>(`/api/v1/traces?${this.qs({ start: q.start, end: q.end, service: q.service, operation: q.operation, status: q.status, trace_id: q.trace_id, min_duration_ns: q.min_duration_ns, max_duration_ns: q.max_duration_ns, limit: q.limit, cursor: q.cursor })}`);
@@ -53,9 +126,36 @@ export class ApiDataProvider implements KairoDataProvider {
   }
   async getMetrics(q: MetricsQuery) { return this.req<RedMetrics>(`/api/v1/metrics/red?${this.qs({ start: q.start, end: q.end, service: q.service, operation: q.operation, interval_seconds: q.interval_seconds })}`); }
   async listScenarios() { const r = await this.req<any>(`/api/v1/scenarios`); return Array.isArray(r) ? r : r.scenarios ?? []; }
-  async runScenario(req: ScenarioRunRequest) { return this.req<ScenarioRun>(`/api/v1/scenarios`, { method: "POST", body: JSON.stringify({ project_id: this.projectId, scenario_type: req.scenario_id, parameters: req.parameters, workload: req.workload }) }); }
+  async runScenario(req: ScenarioRunRequest) {
+    const params = { ...req.parameters };
+    if (req.scenario_id === "payment-errors" && params.error_rate !== undefined && params.error_rate > 1) {
+      params.error_rate = params.error_rate / 100;
+    }
+    this.addConsoleLog({
+      severity: "INFO",
+      subsystem: "api",
+      message: `Dispatching backend scenario ${req.scenario_id} (workload: ${req.workload})`,
+    });
+    return this.req<ScenarioRun>(`/api/v1/scenarios`, {
+      method: "POST",
+      body: JSON.stringify({
+        project_id: this.projectId,
+        scenario_type: req.scenario_id,
+        parameters: params,
+        workload: req.workload,
+      }),
+    });
+  }
+  async cancelScenario(runId: string): Promise<void> {
+    this.addConsoleLog({
+      severity: "WARN",
+      subsystem: "api",
+      message: `Cancelling backend scenario run ${runId}`,
+    });
+    await this.req(`/api/v1/scenarios/${encodeURIComponent(runId)}/cancel`, { method: "POST" });
+  }
   async getScenarioRun(runId: string) { try { return await this.req<ScenarioRun>(`/api/v1/scenarios/${encodeURIComponent(runId)}?project_id=${encodeURIComponent(this.projectId)}`); } catch { return null; } }
-  async listScenarioRuns() { return []; /* The backend exposes runs by id; definitions endpoint lists types only. */ }
+  async listScenarioRuns() { return []; }
   async getAlerts(q: AlertQuery) { const r = await this.req<any>(`/api/v1/alerts?${this.qs({ limit: q.limit })}`); return Array.isArray(r) ? r : r.alerts ?? []; }
   async getProject(): Promise<Project> { return this.req<Project>(`/api/v1/projects/${encodeURIComponent(this.projectId)}`); }
   async updateProject(patch: Partial<Pick<Project, "name" | "retention_days">>) { return this.req<Project>(`/api/v1/projects/${encodeURIComponent(this.projectId)}`, { method: "PATCH", body: JSON.stringify(patch) }); }

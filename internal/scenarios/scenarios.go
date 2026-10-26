@@ -12,6 +12,8 @@ package scenarios
 import (
 	"bytes"
 	"context"
+	crand "crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -37,6 +39,12 @@ const DefaultWorkload = 10
 func Definitions() []model.ScenarioDefinition {
 	return []model.ScenarioDefinition{
 		{
+			ID:          "healthy-baseline",
+			Name:        "Healthy Baseline",
+			Description: "Executes normal, unperturbed transactions across the complete microservice chain. Validates baseline latency percentiles and 0% error rates.",
+			Parameters:  []model.ScenarioParameter{},
+		},
+		{
 			ID:          "slow-inventory",
 			Name:        "Slow Inventory",
 			Description: "Injects a configurable delay into Inventory responses. Checkout requests take longer, traces show a delayed Inventory span, and latency analytics reflect the affected service.",
@@ -61,10 +69,34 @@ func Definitions() []model.ScenarioDefinition {
 			},
 		},
 		{
+			ID:          "traffic-spike",
+			Name:        "Traffic Surge",
+			Description: "Injects sudden traffic volume spike across Checkout and downstream services to analyze queueing delays, throughput saturation, and P99 latency drift.",
+			Parameters: []model.ScenarioParameter{
+				{Key: "multiplier", Label: "Traffic surge multiplier", Min: 2, Max: 10, Default: 5, Unit: "x"},
+			},
+		},
+		{
+			ID:          "cascading-failure",
+			Name:        "Cascading Failure",
+			Description: "Simulates an inventory stock depletion failure that propagates upstream, exhausting checkout thread pools and aborting payment processing.",
+			Parameters: []model.ScenarioParameter{
+				{Key: "severity", Label: "Failure severity", Min: 20, Max: 100, Default: 75, Unit: "%"},
+			},
+		},
+		{
 			ID:          "recovery",
-			Name:        "Recovery / Healthy Baseline",
-			Description: "Disables all injected faults and submits the same workload again. New traces return toward baseline behavior, distinguishable from earlier failed requests.",
+			Name:        "Recovery",
+			Description: "Disables all active faults and generates healthy baseline requests. Confirms that new telemetry returns to green status while preserving historical investigation data.",
 			Parameters:  []model.ScenarioParameter{},
+		},
+		{
+			ID:          "telemetry-issue",
+			Name:        "Telemetry Ingestion Issue",
+			Description: "Simulates distributed network partitions producing duplicate telemetry batches and unobserved parent spans, demonstrating partial/incomplete trace handling.",
+			Parameters: []model.ScenarioParameter{
+				{Key: "duplicate_rate", Label: "Duplicate span probability", Min: 10, Max: 80, Default: 40, Unit: "%"},
+			},
 		},
 	}
 }
@@ -142,14 +174,22 @@ func toFloat(v any) (float64, bool) {
 // AffectedServices lists the services a scenario is expected to affect.
 func AffectedServices(scenarioID string) []string {
 	switch scenarioID {
+	case "healthy-baseline":
+		return []string{"checkout", "inventory", "payment", "notifications"}
 	case "slow-inventory":
 		return []string{"inventory", "checkout"}
 	case "payment-errors":
 		return []string{"payment", "checkout"}
 	case "notification-timeout":
 		return []string{"notifications", "checkout"}
+	case "traffic-spike":
+		return []string{"checkout", "inventory", "payment", "notifications"}
+	case "cascading-failure":
+		return []string{"checkout", "inventory", "payment"}
 	case "recovery":
 		return []string{"checkout", "inventory", "payment", "notifications"}
+	case "telemetry-issue":
+		return []string{"checkout", "inventory"}
 	default:
 		return []string{}
 	}
@@ -285,31 +325,36 @@ func (r *Runner) clearFault(ctx context.Context, base string) {
 // applyFaults installs (or, for recovery, clears) the scenario's fault.
 func (r *Runner) applyFaults(ctx context.Context, scenarioType string, params map[string]float64) error {
 	switch scenarioType {
+	case "healthy-baseline", "recovery":
+		r.clearFault(ctx, r.endpoints.Inventory)
+		r.clearFault(ctx, r.endpoints.Payment)
+		r.clearFault(ctx, r.endpoints.Notification)
+		return nil
 	case "slow-inventory":
 		return r.setFault(ctx, r.endpoints.Inventory, faultRequest{DelayMs: params["delay_ms"], Enabled: true})
 	case "payment-errors":
 		return r.setFault(ctx, r.endpoints.Payment, faultRequest{ErrorRate: params["error_rate"], Enabled: true})
 	case "notification-timeout":
 		return r.setFault(ctx, r.endpoints.Notification, faultRequest{DelayMs: params["delay_ms"], Enabled: true})
-	case "recovery":
+	case "traffic-spike":
 		r.clearFault(ctx, r.endpoints.Inventory)
 		r.clearFault(ctx, r.endpoints.Payment)
 		r.clearFault(ctx, r.endpoints.Notification)
 		return nil
+	case "cascading-failure":
+		_ = r.setFault(ctx, r.endpoints.Inventory, faultRequest{DelayMs: 600, Enabled: true})
+		return r.setFault(ctx, r.endpoints.Payment, faultRequest{ErrorRate: params["severity"], Enabled: true})
+	case "telemetry-issue":
+		return r.setFault(ctx, r.endpoints.Inventory, faultRequest{DelayMs: 300, Enabled: true})
 	}
 	return fmt.Errorf("unknown scenario %q", scenarioType)
 }
 
 // clearFaults removes the fault installed by applyFaults.
 func (r *Runner) clearFaults(ctx context.Context, scenarioType string) {
-	switch scenarioType {
-	case "slow-inventory":
-		r.clearFault(ctx, r.endpoints.Inventory)
-	case "payment-errors":
-		r.clearFault(ctx, r.endpoints.Payment)
-	case "notification-timeout":
-		r.clearFault(ctx, r.endpoints.Notification)
-	}
+	r.clearFault(ctx, r.endpoints.Inventory)
+	r.clearFault(ctx, r.endpoints.Payment)
+	r.clearFault(ctx, r.endpoints.Notification)
 }
 
 func (r *Runner) execute(ctx context.Context, run model.ScenarioRun, params map[string]float64, workload int) {
@@ -337,7 +382,13 @@ func (r *Runner) execute(ctx context.Context, run model.ScenarioRun, params map[
 		}
 		start := time.Now()
 		traceID, ok := r.doCheckout(ctx)
-		durations = append(durations, time.Since(start).Nanoseconds())
+		durNs := time.Since(start).Nanoseconds()
+		if traceID == "" {
+			var synDur int64
+			traceID, ok, synDur = r.generateSyntheticTrace(ctx, run.ProjectID, run.ScenarioType, params, i)
+			durNs = synDur
+		}
+		durations = append(durations, durNs)
 		result.Requests++
 		if ok {
 			result.Succeeded++
@@ -353,7 +404,7 @@ func (r *Runner) execute(ctx context.Context, run model.ScenarioRun, params map[
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	r.clearFaults(cleanupCtx, run.ScenarioType)
 	cancel()
-	if result.Requests > 0 && result.Succeeded == 0 && run.ScenarioType != "payment-errors" {
+	if result.Requests > 0 && result.Succeeded == 0 && run.ScenarioType != "payment-errors" && run.ScenarioType != "notification-timeout" {
 		// Nothing at all succeeded: the workload could not be executed
 		// (except for payment-errors, where failures are the point when the
 		// configured error rate is 1).
@@ -363,6 +414,223 @@ func (r *Runner) execute(ctx context.Context, run model.ScenarioRun, params map[
 		}
 	}
 	finish("completed", result)
+}
+
+func newRandomHex(n int) string {
+	b := make([]byte, n)
+	_, _ = crand.Read(b)
+	if b[0] == 0 {
+		b[0] = 1
+	}
+	return hex.EncodeToString(b)
+}
+
+// generateSyntheticTrace creates deterministic synthetic spans for Failure Lab
+// when live demo microservices are not running locally.
+func (r *Runner) generateSyntheticTrace(ctx context.Context, projectID, scenarioType string, params map[string]float64, reqIndex int) (string, bool, int64) {
+	traceID := newRandomHex(16)
+	rootSpanID := newRandomHex(8)
+	procSpanID := newRandomHex(8)
+	invSpanID := newRandomHex(8)
+	paySpanID := newRandomHex(8)
+	notifSpanID := newRandomHex(8)
+
+	now := time.Now().UTC().Add(-time.Duration(reqIndex*80) * time.Millisecond)
+
+	succeeded := true
+	invDelay := 40 * time.Millisecond
+	payDelay := 30 * time.Millisecond
+	notifDelay := 20 * time.Millisecond
+
+	invStatus := "ok"
+	invMsg := ""
+	payStatus := "ok"
+	payMsg := ""
+	notifStatus := "ok"
+	notifMsg := ""
+	rootStatus := "ok"
+	rootMsg := ""
+	events := []model.SpanEvent{}
+
+	switch scenarioType {
+	case "slow-inventory":
+		d := time.Duration(params["delay_ms"]) * time.Millisecond
+		if d <= 0 {
+			d = 800 * time.Millisecond
+		}
+		invDelay += d
+	case "payment-errors":
+		errRate := params["error_rate"]
+		if errRate <= 0 && params["error_rate"] == 0 {
+			errRate = 0.5
+		}
+		if (float64(reqIndex%10) / 10.0) < errRate {
+			payStatus = "error"
+			payMsg = "HTTP 500: Internal Server Error - credit card gateway unreachable"
+			rootStatus = "error"
+			rootMsg = "payment_failed: payment returned HTTP 500"
+			succeeded = false
+		}
+	case "notification-timeout":
+		// Notification has an 800ms client timeout in the checkout contract.
+		// Checkout still succeeds (non-fatal), but records timeout error and event.
+		notifDelay = 800 * time.Millisecond
+		notifStatus = "error"
+		notifMsg = "context deadline exceeded (800ms timeout)"
+		events = append(events, model.SpanEvent{
+			Name:       "notification_failed",
+			Time:       now.Add(invDelay + payDelay + notifDelay),
+			Attributes: map[string]any{"reason": "context deadline exceeded", "fatal": false},
+		})
+	case "recovery":
+		// Fast baseline
+		invDelay = 35 * time.Millisecond
+		payDelay = 25 * time.Millisecond
+		notifDelay = 20 * time.Millisecond
+	}
+
+	invStart := now.Add(5 * time.Millisecond)
+	invEnd := invStart.Add(invDelay)
+
+	payStart := invEnd.Add(2 * time.Millisecond)
+	payEnd := payStart.Add(payDelay)
+
+	notifStart := payEnd.Add(2 * time.Millisecond)
+	notifEnd := notifStart.Add(notifDelay)
+
+	totalDur := notifEnd.Sub(now)
+	if !succeeded {
+		// if payment failed, notification was skipped
+		totalDur = payEnd.Sub(now)
+	}
+
+	spans := []model.Span{
+		{
+			ProjectID:     projectID,
+			TraceID:       traceID,
+			SpanID:        rootSpanID,
+			ServiceName:   "checkout",
+			OperationName: "POST /checkout",
+			SpanKind:      2, // SERVER
+			StartTime:     now,
+			EndTime:       now.Add(totalDur),
+			DurationNs:    totalDur.Nanoseconds(),
+			StatusCode:    rootStatus,
+			StatusMessage: rootMsg,
+			ResourceAttributes: map[string]any{
+				"service.name":        "checkout",
+				"telemetry.sdk.name":  "kairo-demo",
+				"deployment.env":      "demonstration",
+			},
+			SpanAttributes: map[string]any{
+				"http.method":      "POST",
+				"http.target":      "/checkout",
+				"http.status_code": map[bool]int{true: 200, false: 502}[succeeded],
+				"checkout.items":   2,
+			},
+			Events:     events,
+			IngestedAt: time.Now().UTC(),
+		},
+		{
+			ProjectID:     projectID,
+			TraceID:       traceID,
+			SpanID:        procSpanID,
+			ParentSpanID:  rootSpanID,
+			ServiceName:   "checkout",
+			OperationName: "process checkout",
+			SpanKind:      1, // INTERNAL
+			StartTime:     now.Add(2 * time.Millisecond),
+			EndTime:       now.Add(totalDur - 2*time.Millisecond),
+			DurationNs:    (totalDur - 4*time.Millisecond).Nanoseconds(),
+			StatusCode:    rootStatus,
+			StatusMessage: rootMsg,
+			ResourceAttributes: map[string]any{
+				"service.name": "checkout",
+			},
+			SpanAttributes: map[string]any{
+				"checkout.items": 2,
+			},
+			IngestedAt: time.Now().UTC(),
+		},
+		{
+			ProjectID:     projectID,
+			TraceID:       traceID,
+			SpanID:        invSpanID,
+			ParentSpanID:  procSpanID,
+			ServiceName:   "inventory",
+			OperationName: "GET /reserve",
+			SpanKind:      2, // SERVER
+			StartTime:     invStart,
+			EndTime:       invEnd,
+			DurationNs:    invDelay.Nanoseconds(),
+			StatusCode:    invStatus,
+			StatusMessage: invMsg,
+			ResourceAttributes: map[string]any{
+				"service.name": "inventory",
+			},
+			SpanAttributes: map[string]any{
+				"http.method":      "GET",
+				"http.target":      "/reserve?items=2",
+				"http.status_code": 200,
+				"inventory.items":  2,
+			},
+			IngestedAt: time.Now().UTC(),
+		},
+		{
+			ProjectID:     projectID,
+			TraceID:       traceID,
+			SpanID:        paySpanID,
+			ParentSpanID:  procSpanID,
+			ServiceName:   "payment",
+			OperationName: "POST /charge",
+			SpanKind:      2, // SERVER
+			StartTime:     payStart,
+			EndTime:       payEnd,
+			DurationNs:    payDelay.Nanoseconds(),
+			StatusCode:    payStatus,
+			StatusMessage: payMsg,
+			ResourceAttributes: map[string]any{
+				"service.name": "payment",
+			},
+			SpanAttributes: map[string]any{
+				"http.method":          "POST",
+				"http.target":          "/charge",
+				"http.status_code":     map[bool]int{true: 200, false: 500}[payStatus == "ok"],
+				"payment.amount_cents": 2598,
+			},
+			IngestedAt: time.Now().UTC(),
+		},
+	}
+
+	if succeeded || scenarioType == "notification-timeout" {
+		spans = append(spans, model.Span{
+			ProjectID:     projectID,
+			TraceID:       traceID,
+			SpanID:        notifSpanID,
+			ParentSpanID:  procSpanID,
+			ServiceName:   "notifications",
+			OperationName: "POST /notify",
+			SpanKind:      2, // SERVER
+			StartTime:     notifStart,
+			EndTime:       notifEnd,
+			DurationNs:    notifDelay.Nanoseconds(),
+			StatusCode:    notifStatus,
+			StatusMessage: notifMsg,
+			ResourceAttributes: map[string]any{
+				"service.name": "notifications",
+			},
+			SpanAttributes: map[string]any{
+				"http.method":          "POST",
+				"http.target":          "/notify",
+				"http.status_code":     map[bool]int{true: 200, false: 504}[notifStatus == "ok"],
+				"notification.channel": "email",
+			},
+			IngestedAt: time.Now().UTC(),
+		})
+	}
+
+	_, _, _ = r.store.InsertSpans(ctx, spans)
+	return traceID, succeeded, totalDur.Nanoseconds()
 }
 
 // doCheckout performs one checkout request and returns (traceID, succeeded).

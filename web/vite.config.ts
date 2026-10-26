@@ -15,5 +15,17 @@ export default defineConfig({
       "/v1": { target: "http://localhost:8080", changeOrigin: true },
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          "vendor-react": ["react", "react-dom", "react-router-dom"],
+          "vendor-flow": ["@xyflow/react"],
+          "vendor-charts": ["recharts"],
+          "vendor-query": ["@tanstack/react-query"],
+        },
+      },
+    },
+  },
   test: { environment: "node", include: ["src/**/*.test.ts", "tests/**/*.test.ts"] },
 });

@@ -495,3 +495,30 @@ func TestSettingsRoundTrip(t *testing.T) {
 		t.Fatalf("get retention = %d %s", code, body)
 	}
 }
+
+func TestCORSSupport(t *testing.T) {
+	f := newFixture(t)
+	// Test preflight OPTIONS request
+	req, err := http.NewRequest(http.MethodOptions, f.srv.URL+"/v1/traces", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Origin", "http://localhost:5173")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	req.Header.Set("Access-Control-Request-Headers", "authorization,content-type")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("options status = %d, want 204", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Fatalf("allow-origin = %q, want *", got)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Methods"); !bytes.Contains([]byte(got), []byte("POST")) {
+		t.Fatalf("allow-methods = %q, want POST", got)
+	}
+}

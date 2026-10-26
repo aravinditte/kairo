@@ -1,4 +1,4 @@
-import type { AlertEvent, AlertQuery, ApiKeyMeta, CreateApiKeyResponse, DependencyGraph, DependencyQuery, MetricsQuery, OverviewData, OverviewQuery, Project, RedMetrics, ScenarioDefinition, ScenarioRun, ScenarioRunRequest, ServiceDetail, ServiceQuery, ServiceSummary, Thresholds, TraceDetail, TraceSearchQuery, TraceSearchResult } from "../../types";
+import type { AlertEvent, AlertQuery, ApiKeyMeta, ConsoleLogEntry, CreateApiKeyResponse, DependencyGraph, DependencyQuery, MetricsQuery, OverviewData, OverviewQuery, Project, RedMetrics, ScenarioDefinition, ScenarioRun, ScenarioRunRequest, ServiceDetail, ServiceQuery, ServiceSummary, Thresholds, TraceDetail, TraceSearchQuery, TraceSearchResult } from "../../types";
 
 export interface KairoDataProvider {
   readonly mode: "demo" | "api";
@@ -13,6 +13,7 @@ export interface KairoDataProvider {
   runScenario(request: ScenarioRunRequest): Promise<ScenarioRun>;
   getScenarioRun(runId: string): Promise<ScenarioRun | null>;
   listScenarioRuns(scenarioId?: string): Promise<ScenarioRun[]>;
+  cancelScenario?(runId: string): Promise<void>;
   getAlerts(query: AlertQuery): Promise<AlertEvent[]>;
   getProject(): Promise<Project>;
   updateProject(patch: Partial<Pick<Project, "name" | "retention_days">>): Promise<Project>;
@@ -23,5 +24,8 @@ export interface KairoDataProvider {
   updateThresholds(t: Thresholds): Promise<Thresholds>;
   getRetention(): Promise<{ retention_days: number }>;
   updateRetention(days: number): Promise<{ retention_days: number }>;
-  resetDemoData?(): void;
+  resetDemoData?(full?: boolean): void;
+  getConsoleLogs?(): ConsoleLogEntry[];
+  addConsoleLog?(entry: Omit<ConsoleLogEntry, "id" | "timestamp">): void;
+  clearConsoleLogs?(): void;
 }

@@ -48,12 +48,27 @@ export interface AlertEvent {
   observed_value: number; threshold_value: number; window_start: string; window_end: string; created_at: string; status: string;
 }
 export interface ScenarioParameter { key: string; label: string; min: number; max: number; default: number; unit: string; }
-export interface ScenarioDefinition { id: string; name: string; description: string; parameters: ScenarioParameter[]; }
+export interface ScenarioDefinition {
+  id: string;
+  name: string;
+  description: string;
+  difficulty?: "Beginner" | "Intermediate" | "Advanced" | "Expert";
+  expected_impact?: string;
+  estimated_duration?: string;
+  parameters: ScenarioParameter[];
+}
 export interface ScenarioRunResult { requests: number; succeeded: number; failed: number; p95_ns?: number | null; affected_services: string[]; trace_ids: string[]; }
 export interface ScenarioRun {
   id: string; project_id: string; scenario_type: string; parameters: Record<string, number>;
-  status: "pending" | "running" | "completed" | "failed" | "cancelled";
+  status: "idle" | "starting" | "running" | "completed" | "failed" | "cancelled" | "recovering" | "pending";
   started_at: string; finished_at?: string | null; result_summary?: ScenarioRunResult | null; workload?: number;
+}
+export interface ConsoleLogEntry {
+  id: string;
+  timestamp: string;
+  severity: "INFO" | "DEBUG" | "WARN" | "ERROR" | "SUCCESS";
+  subsystem: string;
+  message: string;
 }
 // Query types
 export interface TimeQuery { start: string; end: string; }

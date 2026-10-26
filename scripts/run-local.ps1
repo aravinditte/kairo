@@ -1,24 +1,25 @@
 # run-local.ps1 - start the full Kairo local stack from a fresh clone:
 #
-#   Kairo API        http://localhost:8080   (in-memory storage unless
-#                                            KAIRO_DATABASE_URL is set)
+#   Frontend (Dev)   http://localhost:5173   (Vite + React connected to API)
+#   Kairo API & App  http://localhost:8080   (Go backend serving web/dist SPA)
 #   checkout         http://localhost:8081
 #   inventory        http://localhost:8082
 #   payment          http://localhost:8083
 #   notifications    http://localhost:8084
-#   frontend (opt-in) http://localhost:5173  - only with -Frontend
 #
 # The API is started in demo mode with the seeded development project and
 # the documented development API key `kairo-dev-key`, which is also the
 # key the demo services use to ingest spans - so traces from real
-# checkouts appear in the API immediately. This key is a development
-# credential only; never use it outside a local demo.
+# checkouts appear in the API immediately.
 #
 # Usage:
-#   .\scripts\run-local.ps1 [-Frontend]
+#   .\scripts\run-local.ps1 [-NoFrontend] [-BuildFrontend]
 #
 # Press Ctrl-C to stop everything. Logs go to .kairo-run\*.log.
-param([switch]$Frontend)
+param(
+    [switch]$NoFrontend,
+    [switch]$BuildFrontend
+)
 $ErrorActionPreference = 'Stop'
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
@@ -48,15 +49,17 @@ function Wait-Healthy([string]$Name, [string]$Url) {
     throw "$Name did not become healthy at $Url; see $LogDir\$Name.log"
 }
 
-function Start-Tracked([string]$File, [string[]]$Args, [hashtable]$Env, [string]$Name) {
+function Start-Tracked([string]$File, [string[]]$ArgumentList, [hashtable]$Env, [string]$Name, [string]$WorkDir = $RepoRoot) {
     $psi = @{
         FilePath               = $File
-        ArgumentList           = $Args
-        WorkingDirectory       = $RepoRoot
+        WorkingDirectory       = $WorkDir
         RedirectStandardOutput = (Join-Path $LogDir "$Name.log")
         RedirectStandardError  = (Join-Path $LogDir "$Name.err.log")
         PassThru               = $true
         NoNewWindow            = $true
+    }
+    if ($ArgumentList -and $ArgumentList.Count -gt 0) {
+        $psi['ArgumentList'] = $ArgumentList
     }
     $old = @{}
     foreach ($k in $Env.Keys) { $old[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, $Env[$k]) }
@@ -118,32 +121,36 @@ try {
         Write-Host "    (checkout failed - check $LogDir\checkout.log; the stack is still up)"
     }
 
-    if ($Frontend) {
-        if (-not (Get-Command npm -ErrorAction SilentlyContinue)) { throw '-Frontend requires npm' }
-        Write-Host '==> Starting frontend dev server on http://localhost:5173'
-        $env:VITE_DATA_MODE = 'api'
-        $env:VITE_API_BASE_URL = "http://localhost:$apiPort"
-        Push-Location web
-        try {
-            npm install --silent | Out-Null
-            $p = Start-Process npm -ArgumentList @('run', 'dev') -WorkingDirectory (Get-Location) `
-                -RedirectStandardOutput (Join-Path $LogDir 'frontend.log') `
-                -RedirectStandardError (Join-Path $LogDir 'frontend.err.log') -PassThru -NoNewWindow
-            $processes += $p
-        } finally { Pop-Location }
+    $npmCmd = if (Get-Command 'npm.cmd' -ErrorAction SilentlyContinue) { 'npm.cmd' } else { 'npm' }
+    $distIndex = Join-Path $RepoRoot 'web\dist\index.html'
+    if ($BuildFrontend -or (-not (Test-Path $distIndex))) {
+        Write-Host '==> Building production frontend assets in web/'
+        & $npmCmd --prefix web run build
+    }
+
+    if (-not $NoFrontend) {
+        Write-Host '==> Starting Vite frontend dev server on http://localhost:5173 (API Mode proxying to http://localhost:8080)'
+        $frontendEnv = @{
+            VITE_DATA_MODE    = 'api'
+            VITE_API_BASE_URL = "http://localhost:$apiPort"
+        }
+        $webDir = Join-Path $RepoRoot 'web'
+        $viteBin = Join-Path $webDir 'node_modules/vite/bin/vite.js'
+        $nodeCmd = if (Get-Command node -ErrorAction SilentlyContinue) { (Get-Command node).Source } else { 'node' }
+        $p = Start-Tracked $nodeCmd @($viteBin, '--host', 'localhost', '--port', '5173') $frontendEnv 'frontend' $webDir
     }
 
     Write-Host ''
-    Write-Host 'Kairo local stack is running:'
-    Write-Host "  API:           http://localhost:$apiPort   (health: http://localhost:$apiPort/healthz)"
-    Write-Host '  Checkout:      http://localhost:8081  (POST /checkout)'
-    Write-Host '  Inventory:     http://localhost:8082  (GET /reserve)'
-    Write-Host '  Payment:       http://localhost:8083  (POST /charge)'
-    Write-Host '  Notifications: http://localhost:8084  (POST /notify)'
-    Write-Host '  Dev API key:   kairo-dev-key (development only)'
-    if ($projectId) { Write-Host "  Demo project:  $projectId" }
-    if ($Frontend) { Write-Host '  Frontend:      http://localhost:5173' }
-    Write-Host "  Logs:          $LogDir\*.log"
+    Write-Host 'Kairo full stack is running:'
+    Write-Host "  Frontend (Dev): http://localhost:5173  (Vite + React connected to API)"
+    Write-Host "  API & App:      http://localhost:$apiPort  (Go backend serving web/dist SPA)"
+    Write-Host '  Checkout:       http://localhost:8081  (POST /checkout)'
+    Write-Host '  Inventory:      http://localhost:8082  (GET /reserve)'
+    Write-Host '  Payment:        http://localhost:8083  (POST /charge)'
+    Write-Host '  Notifications:  http://localhost:8084  (POST /notify)'
+    Write-Host '  Dev API key:    kairo-dev-key (development only)'
+    if ($projectId) { Write-Host "  Demo project:   $projectId" }
+    Write-Host "  Logs:           $LogDir\*.log"
     Write-Host ''
     Write-Host 'Press Ctrl-C to stop.'
     while ($true) { Start-Sleep -Seconds 3600 }

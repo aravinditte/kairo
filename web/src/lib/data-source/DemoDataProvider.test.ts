@@ -71,4 +71,15 @@ describe("DemoDataProvider scenario runs", () => {
     p.resetDemoData();
     expect(p.spanCount()).toBe(before);
   });
+  it("tracks terminal console logs and supports clear", async () => {
+    const p = new DemoDataProvider(42, NOW);
+    const initialLogs = await p.getConsoleLogs();
+    expect(initialLogs.length).toBeGreaterThan(0);
+    p.addConsoleLog({ severity: "INFO", subsystem: "test", message: "Custom test execution event" });
+    const updated = await p.getConsoleLogs();
+    expect(updated[updated.length - 1].message).toBe("Custom test execution event");
+    p.clearConsoleLogs();
+    const cleared = await p.getConsoleLogs();
+    expect(cleared.length).toBe(0);
+  });
 });

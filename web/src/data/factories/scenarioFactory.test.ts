@@ -37,4 +37,25 @@ describe("scenario factory determinism", () => {
     const roots = spans.filter((s) => s.service_name === "checkout" && s.span_kind === 2);
     expect(roots.every((s) => s.status_code !== "error")).toBe(true);
   });
+  it("healthy-baseline produces zero errors across all spans", () => {
+    const spans = generateScenarioTraces({ ...base, scenarioId: "healthy-baseline", parameters: {} });
+    expect(spans.every((s) => s.status_code !== "error")).toBe(true);
+    expect(spans.length).toBeGreaterThan(0);
+  });
+  it("traffic-spike generates scaled workload traces and elevated durations", () => {
+    const spansNormal = generateScenarioTraces({ ...base, scenarioId: "traffic-spike", parameters: { multiplier: 1 } });
+    const spansSpike = generateScenarioTraces({ ...base, scenarioId: "traffic-spike", workload: 10, parameters: { multiplier: 3 } });
+    expect(spansSpike.length).toBe(100);
+    expect(spansNormal.length).toBe(50);
+    expect(spansSpike[0].duration_ns).toBeGreaterThan(spansNormal[0].duration_ns);
+  });
+  it("cascading-failure triggers errors across multiple dependent services", () => {
+    const spans = generateScenarioTraces({ ...base, scenarioId: "cascading-failure", parameters: { upstream_timeout_ms: 500 } });
+    const errServices = new Set(spans.filter((s) => s.status_code === "error").map((s) => s.service_name));
+    expect(errServices.size).toBeGreaterThanOrEqual(2);
+  });
+  it("telemetry-issue generates traces with simulated telemetry anomalies", () => {
+    const spans = generateScenarioTraces({ ...base, scenarioId: "telemetry-issue", parameters: { drop_rate: 50 } });
+    expect(spans.length).toBeGreaterThan(0);
+  });
 });

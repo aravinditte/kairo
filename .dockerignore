@@ -1,0 +1,9 @@
+.git
+.github
+.kairo-run
+node_modules
+web/node_modules
+web/dist
+dist
+*.log
+*.err.log
