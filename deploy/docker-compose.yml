@@ -1,0 +1,109 @@
+# Kairo local full-stack deployment.
+#   Start:  docker compose -f deploy/docker-compose.yml up --build
+#   Stop:   docker compose -f deploy/docker-compose.yml down
+#   Reset:  docker compose -f deploy/docker-compose.yml down -v   (deletes the DB volume)
+#
+# Services: PostgreSQL, Kairo API (applies migrations on startup), the four
+# instrumented demo services, and the frontend in API mode.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: kairo
+      POSTGRES_PASSWORD: kairo
+      POSTGRES_DB: kairo
+    volumes:
+      - kairo-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kairo -d kairo"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      KAIRO_ENV: development
+      KAIRO_HTTP_ADDR: ":8080"
+      KAIRO_DATABASE_URL: "postgres://kairo:kairo@postgres:5432/kairo?sslmode=disable"
+      KAIRO_ADMIN_TOKEN: "kairo-dev-admin"
+      KAIRO_DEMO_MODE: "true"
+      KAIRO_SEED_DEMO: "true"
+      KAIRO_CHECKOUT_URL: "http://checkout:8081"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  checkout:
+    build:
+      context: ..
+      dockerfile: services/Dockerfile
+      args: { SERVICE: checkout }
+    environment:
+      PORT: "8081"
+      KAIRO_ENDPOINT: "http://api:8080/v1/traces"
+      KAIRO_API_KEY: "kairo-dev-key"
+      INVENTORY_URL: "http://inventory:8082"
+      PAYMENT_URL: "http://payment:8083"
+      NOTIFICATION_URL: "http://notifications:8084"
+    ports:
+      - "8081:8081"
+    depends_on:
+      - inventory
+      - payment
+      - notifications
+
+  inventory:
+    build:
+      context: ..
+      dockerfile: services/Dockerfile
+      args: { SERVICE: inventory }
+    environment:
+      PORT: "8082"
+      KAIRO_ENDPOINT: "http://api:8080/v1/traces"
+      KAIRO_API_KEY: "kairo-dev-key"
+    ports:
+      - "8082:8082"
+
+  payment:
+    build:
+      context: ..
+      dockerfile: services/Dockerfile
+      args: { SERVICE: payment }
+    environment:
+      PORT: "8083"
+      KAIRO_ENDPOINT: "http://api:8080/v1/traces"
+      KAIRO_API_KEY: "kairo-dev-key"
+    ports:
+      - "8083:8083"
+
+  notifications:
+    build:
+      context: ..
+      dockerfile: services/Dockerfile
+      args: { SERVICE: notifications }
+    environment:
+      PORT: "8084"
+      KAIRO_ENDPOINT: "http://api:8080/v1/traces"
+      KAIRO_API_KEY: "kairo-dev-key"
+    ports:
+      - "8084:8084"
+
+  web:
+    build:
+      context: ../web
+      dockerfile: Dockerfile
+      args:
+        VITE_DATA_MODE: "api"
+        VITE_API_BASE_URL: "http://localhost:8080"
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+
+volumes:
+  kairo-pgdata:
