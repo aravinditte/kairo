@@ -1,0 +1,10 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root { color-scheme: light; }
+.dark { color-scheme: dark; }
+html, body, #root { height: 100%; }
+body { font-family: ui-sans-system, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #3f4756; border-radius: 6px; }

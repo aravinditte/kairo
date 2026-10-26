@@ -1,0 +1,136 @@
+openapi: 3.1.0
+info:
+  title: Kairo API
+  version: 1.0.0
+  description: >
+    Distributed observability and failure investigation platform.
+    Ingestion is OTLP/HTTP using the official OpenTelemetry protobuf types.
+    Metric rule: a "request" is a span with span_kind = SERVER; percentiles
+    are nearest-rank over those spans and are null when there are no samples.
+servers:
+  - url: http://localhost:8080
+security: []
+paths:
+  /healthz:
+    get:
+      summary: Liveness
+      responses: { "200": { description: OK } }
+  /readyz:
+    get:
+      summary: Readiness (includes database connectivity)
+      responses: { "200": { description: Ready }, "503": { description: Not ready } }
+  /v1/traces:
+    post:
+      summary: OTLP/HTTP trace ingestion
+      description: Accepts application/x-protobuf and application/json ExportTraceServiceRequest payloads. Authenticated with a project API key. Acknowledged only after durable storage.
+      parameters:
+        - { name: Authorization, in: header, schema: { type: string }, description: "Bearer <api-key> (or X-Api-Key header)" }
+      requestBody:
+        content:
+          application/x-protobuf: { schema: { type: string, format: binary } }
+          application/json: { schema: { type: object } }
+      responses:
+        "200": { description: Stored (ExportTraceServiceResponse, partial_success when duplicates were ignored) }
+        "400": { description: Malformed payload, invalid ids or timestamps }
+        "401": { description: Missing, invalid or revoked API key }
+        "413": { description: Body or batch over configured limits }
+        "503": { description: Storage failure — NOT acknowledged as stored }
+  /api/v1/projects:
+    post:
+      summary: Create project (admin token)
+      responses: { "201": { description: Project } }
+    get:
+      summary: List projects (admin token)
+      responses: { "200": { description: Projects } }
+  /api/v1/projects/{projectId}:
+    parameters: [ { name: projectId, in: path, required: true, schema: { type: string, format: uuid } } ]
+    get: { summary: Get project, responses: { "200": { description: Project }, "404": { description: Not found } } }
+    patch: { summary: Update name/retention/thresholds, responses: { "200": { description: Project } } }
+    delete: { summary: Delete project and its telemetry (admin token, explicit), responses: { "204": { description: Deleted } } }
+  /api/v1/projects/{projectId}/api-keys:
+    parameters: [ { name: projectId, in: path, required: true, schema: { type: string, format: uuid } } ]
+    post:
+      summary: Create API key — raw key returned exactly once in this response
+      responses: { "201": { description: "{api_key metadata, raw_key}" } }
+    get: { summary: List key metadata (never raw keys), responses: { "200": { description: Keys } } }
+  /api/v1/api-keys/{keyId}/revoke:
+    parameters: [ { name: keyId, in: path, required: true, schema: { type: string, format: uuid } } ]
+    post: { summary: Revoke a key, responses: { "200": { description: Revoked } } }
+  /api/v1/traces:
+    get:
+      summary: Search traces (stable order start_time DESC, trace_id DESC; opaque cursor)
+      parameters:
+        - { name: project_id, in: query, schema: { type: string, format: uuid } }
+        - { name: start, in: query, schema: { type: string, format: date-time } }
+        - { name: end, in: query, schema: { type: string, format: date-time } }
+        - { name: service, in: query, schema: { type: string } }
+        - { name: operation, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string, enum: [error, ok] } }
+        - { name: trace_id, in: query, schema: { type: string } }
+        - { name: min_duration_ns, in: query, schema: { type: integer, format: int64 } }
+        - { name: max_duration_ns, in: query, schema: { type: integer, format: int64 } }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses: { "200": { description: "{traces: [TraceSummary], next_cursor}" } }
+  /api/v1/traces/{traceId}:
+    parameters: [ { name: traceId, in: path, required: true, schema: { type: string, pattern: "^[0-9a-f]{32}$" } } ]
+    get: { summary: Trace detail with all spans, responses: { "200": { description: TraceDetail }, "404": { description: Not found } } }
+  /api/v1/services:
+    get: { summary: Observed services with RED summaries, responses: { "200": { description: "[ServiceSummary]" } } }
+  /api/v1/services/{serviceName}:
+    parameters: [ { name: serviceName, in: path, required: true, schema: { type: string } } ]
+    get: { summary: Service detail (metrics, operations, dependencies, recent traces), responses: { "200": { description: ServiceDetail } } }
+  /api/v1/dependencies:
+    get: { summary: Dependency edges inferred from observed traces, responses: { "200": { description: "[DependencyEdge] (bare array)" } } }
+  /api/v1/metrics/red:
+    get:
+      summary: RED metrics and bucketed series for a window/service/operation
+      parameters:
+        - { name: interval_seconds, in: query, schema: { type: integer, default: 60 } }
+      responses: { "200": { description: REDMetrics } }
+  /api/v1/overview:
+    get: { summary: Dashboard assembly, responses: { "200": { description: Overview } } }
+  /api/v1/scenarios:
+    get: { summary: Scenario definitions, responses: { "200": { description: "[ScenarioDefinition]" } } }
+    post: { summary: Start a bounded Failure Lab run against the demo services, responses: { "201": { description: ScenarioRun } } }
+  /api/v1/scenarios/{runId}:
+    parameters: [ { name: runId, in: path, required: true, schema: { type: string, format: uuid } } ]
+    get: { summary: Scenario run status and results, responses: { "200": { description: ScenarioRun } } }
+  /api/v1/scenarios/{runId}/cancel:
+    parameters: [ { name: runId, in: path, required: true, schema: { type: string, format: uuid } } ]
+    post: { summary: Cancel a running scenario, responses: { "200": { description: ScenarioRun } } }
+  /api/v1/alerts:
+    get: { summary: Threshold alert events, responses: { "200": { description: "[AlertEvent]" } } }
+  /api/v1/settings/thresholds:
+    get: { summary: Project thresholds, responses: { "200": { description: Thresholds } } }
+    patch: { summary: Update thresholds, responses: { "200": { description: Thresholds } } }
+  /api/v1/settings/retention:
+    get: { summary: Retention policy, responses: { "200": { description: "{retention_days}" } } }
+    patch: { summary: Update retention policy, responses: { "200": { description: "{retention_days}" } } }
+components:
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties: { code: { type: string }, message: { type: string } }
+    Span:
+      type: object
+      properties:
+        project_id: { type: string, format: uuid }
+        trace_id: { type: string, pattern: "^[0-9a-f]{32}$" }
+        span_id: { type: string, pattern: "^[0-9a-f]{16}$" }
+        parent_span_id: { type: string, nullable: true }
+        service_name: { type: string }
+        operation_name: { type: string }
+        span_kind: { type: integer, description: "OTLP SpanKind enum (2 = SERVER)" }
+        start_time: { type: string, format: date-time }
+        end_time: { type: string, format: date-time }
+        duration_ns: { type: integer, format: int64 }
+        status_code: { type: string, enum: [unset, ok, error] }
+        status_message: { type: string, nullable: true }
+        resource_attributes: { type: object, additionalProperties: true }
+        span_attributes: { type: object, additionalProperties: true }
+        events: { type: array, items: { type: object } }
+        links: { type: array, items: { type: object } }
